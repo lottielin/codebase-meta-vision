@@ -2308,6 +2308,10 @@ int main(int argc, const char **argv_) {
       FOREACH_STREAM(vpx_codec_destroy(&stream->decoder));
     }
 
+    // TODO(clin)
+    const char* fp_stat_csv_file = "firstpass_stat.csv";
+    add_filename_to_csv(fp_stat_csv_file, input.filename);  
+
     close_input_file(&input);
 
     if (global.test_decode == TEST_DECODE_FATAL) {
@@ -2356,5 +2360,11 @@ int main(int argc, const char **argv_) {
   vpx_img_free(&raw);
   free(argv);
   free(streams);
+
+  // TODO(clin)
+  const char* fp_stat_csv_file = "firstpass_stat.csv";
+  FILE *inFile = fopen(fp_stat_csv_file, "w");
+  fclose(inFile);
+  
   return res ? EXIT_FAILURE : EXIT_SUCCESS;
 }

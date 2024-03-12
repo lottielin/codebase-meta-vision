@@ -6757,11 +6757,11 @@ int vp9_get_compressed_data(VP9_COMP *cpi, unsigned int *frame_flags,
 #endif  // CONFIG_VP9_HIGHBITDEPTH
     cpi->td.mb.inv_txfm_add = lossless ? vp9_iwht4x4_add : vp9_idct4x4_add;
     vp9_first_pass(cpi, source);
+  } else if (oxcf->pass == 2 && !cpi->use_svc) {
     // TODO(clin): clear temp first pass stat csv file
     const char* fp_stat_csv_file = "firstpass_stat.csv";
     FILE *inFile = fopen(fp_stat_csv_file, "w");
     fclose(inFile);
-  } else if (oxcf->pass == 2 && !cpi->use_svc) {
     //ghua: exit second pass, run first pass only to speed up
     exit(1);
     Pass2Encode(cpi, size, dest, frame_flags);
