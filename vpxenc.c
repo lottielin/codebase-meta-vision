@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+#include <sys/stat.h>
 
 #if CONFIG_LIBYUV
 #include "third_party/libyuv/include/libyuv/scale.h"
@@ -122,6 +124,59 @@ static int fourcc_is_ivf(const char detect[4]) {
   }
   return 0;
 }
+
+// TODO(clin)
+// Add "filename" field to firstpass stats csv
+static void add_filename_to_csv(const char* csv_fileName, const char* video_fileName) {
+
+  char* dir_name = "firstpass_stats_csv";
+  struct stat st = {0};
+  if (stat(dir_name, &st) == -1) {
+        if (mkdir(dir_name, 0777) == -1) {
+            perror("Error creating directory");
+            // return 1;
+        } else {
+            printf("Directory created: %s\n", dir_name);
+        }
+    }
+
+  char outFilename[256];
+  outFilename[0] = '\0';
+  strcat(outFilename, "firstpass_stats_csv/fps_");
+  strcat(outFilename, video_fileName);
+  strcat(outFilename, ".csv");
+  fprintf(stderr, "Creating CSV file %s\n", outFilename);
+
+  FILE *inFile, *outFile;
+  inFile = fopen(csv_fileName, "r");
+  outFile = fopen(outFilename, "w");
+
+  // Clear the content of outFile
+  fclose(outFile);
+  outFile = fopen(outFilename, "w");
+
+  char line[1024];
+  bool firstLine = true;
+  while (fgets(line, sizeof(line), inFile)) {
+    line[strcspn(line, "\n")] = '\0';
+
+    if (firstLine) {
+      // Add "filename" as the first field in the header line
+      fprintf(outFile, "filename,%s\n", line);
+      firstLine = false;
+    } else {
+      // Add input filename as the first field in the data lines
+      fprintf(outFile, "%s,%s\n", video_fileName, line);
+    }
+  }
+
+  fclose(inFile);
+  fclose(outFile);
+
+  fprintf(stderr, "Finished creating CSV file: %s.\n", outFilename);
+
+}
+
 
 static const arg_def_t help =
     ARG_DEF(NULL, "help", 0, "Show usage options and exit");
