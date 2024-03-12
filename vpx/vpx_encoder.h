@@ -197,6 +197,13 @@ typedef struct vpx_codec_cx_pkt {
   } data;                                               /**< packet data */
 } vpx_codec_cx_pkt_t; /**< alias for struct vpx_codec_cx_pkt */
 
+struct vp_psnr_pkt {
+  unsigned int samples[4]; /**< Number of samples, total/y/u/v */
+  uint64_t sse[4];         /**< sum squared error, total/y/u/v */
+  double psnr[4];          /**< PSNR, total/y/u/v */
+};                    /**< data for PSNR packet */
+
+
 /*!\brief Encoder return output buffer callback
  *
  * This callback function, when registered, returns with packets when each

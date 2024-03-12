@@ -2670,12 +2670,14 @@ static void generate_psnr_packet(VP9_COMP *cpi) {
     pkt.data.psnr.psnr[i] = psnr.psnr[i];
   }
   pkt.kind = VPX_CODEC_PSNR_PKT;
+#if 0
   if (cpi->use_svc)
     cpi->svc
         .layer_context[cpi->svc.spatial_layer_id *
                        cpi->svc.number_temporal_layers]
         .psnr_pkt = pkt.data.psnr;
   else
+#endif
     vpx_codec_pkt_list_add(cpi->output_pkt_list, &pkt);
 }
 
@@ -6756,6 +6758,8 @@ int vp9_get_compressed_data(VP9_COMP *cpi, unsigned int *frame_flags,
     cpi->td.mb.inv_txfm_add = lossless ? vp9_iwht4x4_add : vp9_idct4x4_add;
     vp9_first_pass(cpi, source);
   } else if (oxcf->pass == 2 && !cpi->use_svc) {
+    //ghua: exit second pass, run first pass only to speed up
+    exit(1);
     Pass2Encode(cpi, size, dest, frame_flags);
   } else if (cpi->use_svc) {
     SvcEncode(cpi, size, dest, frame_flags);

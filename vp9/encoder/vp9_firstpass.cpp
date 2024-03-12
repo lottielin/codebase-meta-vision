@@ -39,6 +39,11 @@
 #include "vp9/encoder/vp9_rd.h"
 #include "vpx_dsp/variance.h"
 
+// shot detection support
+#include "vid_shd.h"
+#include <iostream>
+#include <iomanip>
+
 #define OUTPUT_FPF 0
 #define ARF_STATS_OUTPUT 0
 #define COMPLEXITY_STATS_OUTPUT 0
@@ -393,7 +398,7 @@ static void first_pass_motion_search(VP9_COMP *cpi, MACROBLOCK *x,
                                      int *best_motion_err) {
   MACROBLOCKD *const xd = &x->e_mbd;
   MV tmp_mv = { 0, 0 };
-  MV ref_mv_full = { ref_mv->row >> 3, ref_mv->col >> 3 };
+  MV ref_mv_full = { (int16_t)(ref_mv->row >> 3), (int16_t)(ref_mv->col >> 3) };
   int num00, tmp_err, n;
   const BLOCK_SIZE bsize = xd->mi[0]->sb_type;
   vp9_variance_fn_ptr_t v_fn_ptr = cpi->fn_ptr[bsize];
@@ -808,6 +813,8 @@ static void accumulate_fp_mb_row_stat(TileDataEnc *this_tile,
           : VPXMIN(this_tile->fp_data.image_data_start_row,
                    fp_acc_data->image_data_start_row);
 }
+
+
 
 #define NZ_MOTION_PENALTY 128
 #define INTRA_MODE_PENALTY 1024
@@ -1335,6 +1342,86 @@ static void first_pass_encode(VP9_COMP *cpi, FIRSTPASS_DATA *fp_acc_data) {
   }
 }
 
+// shot detection support
+static std::unique_ptr<vid_shd> pshd;
+
+double L1norm(const std::vector<unsigned int>& hist_src, const std::vector<unsigned int>& hist_ref,
+              const int height, const int width) {
+
+  double sum = 0;
+  double norm;
+  int num1, num2;
+  for (int ind=0;ind < HIST_SIZE;++ind) {
+    num1 = static_cast<int>(hist_src[ind]);
+    num2 = static_cast<int>(hist_ref[ind]);
+    sum += ((num1>=num2)?(num1-num2):(num2-num1));//std::abs(num1-num2);
+  }
+
+  norm = sum/(width*height);
+  return norm;
+}
+
+void prepare_luma_data(const VP9_COMP *cpi, std::vector<unsigned int> &luma_src, std::vector <unsigned int> &luma_ref) {
+    int width  = cpi->common.width;
+    int height = cpi->common.height;
+
+    uint8_t *curr = cpi->Source->y_buffer;
+    uint8_t *last = cpi->unscaled_last_source->y_buffer;
+    int num = 0;
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            luma_src[num]   = curr[x];
+            luma_ref[num++] = last[x];
+        }
+        curr += cpi->Source->y_stride;
+        last += cpi->unscaled_last_source->y_stride;
+    }
+}
+
+// Tranform chroma array into HW order: Cb Cr Cb Cr ...
+void prepare_chroma_data(const VP9_COMP *cpi, std::vector<unsigned int> &chroma_src, std::vector <unsigned int> &chroma_ref) {
+    int width  = cpi->common.width >> 1;
+    int height = cpi->common.height >> 1;
+
+    uint8_t *curr[2] = {cpi->Source->u_buffer, cpi->Source->v_buffer};
+    uint8_t *last[2] = {cpi->unscaled_last_source->u_buffer, cpi->unscaled_last_source->v_buffer};
+
+    int num = 0;
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            chroma_src[num]   = curr[0][x];
+            chroma_src[num+1] = curr[1][x];
+            chroma_ref[num]   = last[0][x];
+            chroma_ref[num+1] = last[1][x];
+            num+=2;
+        }
+        curr[0] += cpi->Source->uv_stride;
+        curr[1] += cpi->Source->uv_stride;
+        last[0] += cpi->unscaled_last_source->uv_stride;
+        last[1] += cpi->unscaled_last_source->uv_stride;
+    }
+}
+
+void vp9_scenecut_detect() {
+/*
+    	shotDetector->onEndOfStream();
+    auto transitions = shotDetector->getTransitions();
+//    std::cout << "Transitions: (frame_num) (thresh_strength)" << std::endl;
+    std::cout << std::setw(4) << std::endl;
+    for (const auto& t : transitions) {
+        std::cout << "Shot detected at frame " << std::setw(4) << t.frameNumPost
+	      	  << " with thresh strength " << t.threshold << std::endl;
+    }
+
+#ifndef EXIT_AFTER_SCENE_CHANGE_DETECTION
+    std::cout << "Encoding stopped prematurely if only scenecut info needed."
+              << std::endl;
+    exit(1);
+#endif
+*/
+}
+///////////////
+
 void vp9_first_pass(VP9_COMP *cpi, const struct lookahead_entry *source) {
   MACROBLOCK *const x = &cpi->td.mb;
   VP9_COMMON *const cm = &cpi->common;
@@ -1389,14 +1476,61 @@ void vp9_first_pass(VP9_COMP *cpi, const struct lookahead_entry *source) {
 
   cm->log2_tile_rows = 0;
 
+  // shot detection support start
+  if (cm->current_video_frame >= 1) {
+      int width_luma    = cm->width;
+      int height_luma   = cm->height;
+      int width_chroma  = width_luma  / 2;
+      int height_chroma = height_luma / 2;
+
+      if (cm->current_video_frame == 1) {
+          pshd = std::make_unique<vid_shd>(height_luma, width_luma, 8, 0, 0, 0);
+      }
+
+      int frm_size = width_luma*height_luma;
+      std::vector<unsigned int> luma_src(frm_size, 0);
+      std::vector<unsigned int> luma_ref(frm_size, 0);
+      prepare_luma_data(cpi, luma_src, luma_ref);
+
+      double diff = 0;
+
+      // Make luma histograms
+      pshd->set_params(height_luma, width_luma, 0);
+      pshd->set_buffers(luma_src.data(), luma_ref.data());
+      pshd->calc_core();
+      const std::vector<unsigned int>& hist_src_y = pshd->get_hist(HIST_SRC, false);
+      const std::vector<unsigned int>& hist_ref_y = pshd->get_hist(HIST_REF, false);
+      const std::vector<unsigned int>& hist_diff_y = pshd->get_hist(HIST_DIFF, false);
+      diff += L1norm(hist_src_y, hist_ref_y, height_luma, width_luma);
+
+#if 1  ////ghua: we may not need chroma histogram
+      // Make chroma histograms
+      std::vector<unsigned int> chroma_src(frm_size >> 1, 0);
+      std::vector<unsigned int> chroma_ref(frm_size >> 1, 0);
+      prepare_chroma_data(cpi, chroma_src, chroma_ref);
+
+      pshd->set_params(height_chroma, width_chroma, 1);
+      pshd->set_buffers(chroma_src.data(), chroma_ref.data());
+      pshd->calc_core();
+      const std::vector<unsigned int>& hist_src_cb = pshd->get_hist(HIST_SRC, false);
+      const std::vector<unsigned int>& hist_ref_cb = pshd->get_hist(HIST_REF, false);
+      diff += L1norm(hist_src_cb, hist_ref_cb, height_chroma, width_chroma);
+
+      const std::vector<unsigned int>& hist_src_cr = pshd->get_hist(HIST_SRC, true);
+      const std::vector<unsigned int>& hist_ref_cr = pshd->get_hist(HIST_REF, true);
+      diff += L1norm(hist_src_cr, hist_ref_cr, height_chroma, width_chroma);
+#endif
+      printf("frame %d, diff of histogram between src and ref=%f\n", cm->current_video_frame, diff);
+  }
+  // shot detection support end
+
   if (cpi->row_mt_bit_exact && cpi->twopass.fp_mb_float_stats == NULL)
-    CHECK_MEM_ERROR(
-        cm, cpi->twopass.fp_mb_float_stats,
-        vpx_calloc(cm->MBs * sizeof(*cpi->twopass.fp_mb_float_stats), 1));
+      CHECK_MEM_ERROR(cm, cpi->twopass.fp_mb_float_stats,
+        (FP_MB_FLOAT_STATS*)vpx_calloc(cm->MBs * sizeof(*cpi->twopass.fp_mb_float_stats), 1));
 
   {
     FIRSTPASS_STATS fps;
-    TileDataEnc *first_tile_col;
+    TileDataEnc*    first_tile_col;
     if (!cpi->row_mt) {
       cm->log2_tile_cols = 0;
       cpi->row_mt_sync_read_ptr = vp9_row_mt_sync_read_dummy;
@@ -1452,8 +1586,7 @@ void vp9_first_pass(VP9_COMP *cpi, const struct lookahead_entry *source) {
   vpx_extend_frame_borders(new_yv12);
 
   // The frame we just compressed now becomes the last frame.
-  ref_cnt_fb(pool->frame_bufs, &cm->ref_frame_map[cpi->lst_fb_idx],
-             cm->new_fb_idx);
+  ref_cnt_fb(pool->frame_bufs, &cm->ref_frame_map[cpi->lst_fb_idx], cm->new_fb_idx);
 
   // Special case for the first frame. Copy into the GF buffer as a second
   // reference.
@@ -1511,15 +1644,10 @@ static double wq_err_divisor(VP9_COMP *cpi) {
 
   // Use a different error per mb factor for calculating boost for
   //  different formats.
-  if (screen_area <= 640 * 360) {
-    return 115.0;
-  } else if (screen_area < 1280 * 720) {
-    return 125.0;
-  } else if (screen_area <= 1920 * 1080) {
-    return 130.0;
-  } else if (screen_area < 3840 * 2160) {
-    return 150.0;
-  }
+  if (screen_area <=  640 *  360) return 115.0;
+  if (screen_area <  1280 *  720) return 125.0;
+  if (screen_area <= 1920 * 1080) return 130.0;
+  if (screen_area <  3840 * 2160) return 150.0;
 
   // Fall through to here only for 4K and above.
   return 200.0;
@@ -1528,35 +1656,34 @@ static double wq_err_divisor(VP9_COMP *cpi) {
 #define NOISE_FACTOR_MIN 0.9
 #define NOISE_FACTOR_MAX 1.1
 static int get_twopass_worst_quality(VP9_COMP *cpi, const double section_err,
-                                     double inactive_zone, double section_noise,
-                                     int section_target_bandwidth) {
-  const RATE_CONTROL *const rc = &cpi->rc;
-  const VP9EncoderConfig *const oxcf = &cpi->oxcf;
-  TWO_PASS *const twopass = &cpi->twopass;
-  double last_group_rate_err;
+    double inactive_zone, double section_noise, int section_target_bandwidth) {
 
-  // Clamp the target rate to VBR min / max limts.
-  const int target_rate =
-      vp9_rc_clamp_pframe_target_size(cpi, section_target_bandwidth);
-  double noise_factor = pow((section_noise / SECTION_NOISE_DEF), 0.5);
-  noise_factor = fclamp(noise_factor, NOISE_FACTOR_MIN, NOISE_FACTOR_MAX);
-  inactive_zone = fclamp(inactive_zone, 0.0, 1.0);
+    const RATE_CONTROL *const rc = &cpi->rc;
+    const VP9EncoderConfig *const oxcf = &cpi->oxcf;
+    TWO_PASS *const twopass = &cpi->twopass;
+    double last_group_rate_err;
 
-// TODO(jimbankoski): remove #if here or below when this has been
-// well tested.
+    // Clamp the target rate to VBR min / max limts.
+    const int target_rate = vp9_rc_clamp_pframe_target_size(cpi, section_target_bandwidth);
+    double noise_factor = pow((section_noise / SECTION_NOISE_DEF), 0.5);
+    noise_factor = fclamp(noise_factor, NOISE_FACTOR_MIN, NOISE_FACTOR_MAX);
+    inactive_zone = fclamp(inactive_zone, 0.0, 1.0);
+
+    // TODO(jimbankoski): remove #if here or below when this has been
+    // well tested.
 #if CONFIG_ALWAYS_ADJUST_BPM
-  // based on recent history adjust expectations of bits per macroblock.
-  last_group_rate_err =
-      (double)twopass->rolling_arf_group_actual_bits /
-      DOUBLE_DIVIDE_CHECK((double)twopass->rolling_arf_group_target_bits);
-  last_group_rate_err = VPXMAX(0.25, VPXMIN(4.0, last_group_rate_err));
-  twopass->bpm_factor *= (3.0 + last_group_rate_err) / 4.0;
-  twopass->bpm_factor = VPXMAX(0.25, VPXMIN(4.0, twopass->bpm_factor));
+    // based on recent history adjust expectations of bits per macroblock.
+    last_group_rate_err = (double)twopass->rolling_arf_group_actual_bits /
+        DOUBLE_DIVIDE_CHECK((double)twopass->rolling_arf_group_target_bits);
+    last_group_rate_err = VPXMAX(0.25, VPXMIN(4.0, last_group_rate_err));
+    twopass->bpm_factor *= (3.0 + last_group_rate_err) / 4.0;
+    twopass->bpm_factor = VPXMAX(0.25, VPXMIN(4.0, twopass->bpm_factor));
 #endif
 
-  if (target_rate <= 0) {
-    return rc->worst_quality;  // Highest value allowed
-  } else {
+    if (target_rate <= 0) {
+        return rc->worst_quality;  // Highest value allowed
+    }
+
     const int num_mbs = (cpi->oxcf.resize_mode != RESIZE_NONE)
                             ? cpi->initial_mbs
                             : cpi->common.MBs;
@@ -1583,59 +1710,56 @@ static int get_twopass_worst_quality(VP9_COMP *cpi, const double section_err,
     // Try and pick a max Q that will be high enough to encode the
     // content at the given rate.
     for (q = rc->best_quality; q < rc->worst_quality; ++q) {
-      const double factor =
-          calc_correction_factor(av_err_per_mb, wq_err_divisor(cpi), q);
-      const int bits_per_mb = vp9_rc_bits_per_mb(
-          INTER_FRAME, q,
-          factor * speed_term * cpi->twopass.bpm_factor * noise_factor,
-          cpi->common.bit_depth);
-      if (bits_per_mb <= target_norm_bits_per_mb) break;
+        const double factor =
+            calc_correction_factor(av_err_per_mb, wq_err_divisor(cpi), q);
+        const int bits_per_mb = vp9_rc_bits_per_mb(INTER_FRAME, q,
+            factor * speed_term * cpi->twopass.bpm_factor * noise_factor,
+                cpi->common.bit_depth);
+        if (bits_per_mb <= target_norm_bits_per_mb) break;
     }
 
     // Restriction on active max q for constrained quality mode.
-    if (cpi->oxcf.rc_mode == VPX_CQ) q = VPXMAX(q, oxcf->cq_level);
+    if (cpi->oxcf.rc_mode == VPX_CQ)
+        q = VPXMAX(q, oxcf->cq_level);
     return q;
+}
+
+static void setup_rf_level_maxq(VP9_COMP* cpi) {
+
+  RATE_CONTROL* const rc = &cpi->rc;
+  for (int i = INTER_NORMAL; i < RATE_FACTOR_LEVELS; ++i) {
+      int qdelta = vp9_frame_type_qdelta(cpi, i, rc->worst_quality);
+      rc->rf_level_maxq[i] = VPXMAX(rc->worst_quality + qdelta, rc->best_quality);
   }
 }
 
-static void setup_rf_level_maxq(VP9_COMP *cpi) {
-  int i;
-  RATE_CONTROL *const rc = &cpi->rc;
-  for (i = INTER_NORMAL; i < RATE_FACTOR_LEVELS; ++i) {
-    int qdelta = vp9_frame_type_qdelta(cpi, i, rc->worst_quality);
-    rc->rf_level_maxq[i] = VPXMAX(rc->worst_quality + qdelta, rc->best_quality);
-  }
-}
-
-static void init_subsampling(VP9_COMP *cpi) {
-  const VP9_COMMON *const cm = &cpi->common;
-  RATE_CONTROL *const rc = &cpi->rc;
+static void init_subsampling(VP9_COMP* cpi) {
+  const VP9_COMMON* const cm = &cpi->common;
+  RATE_CONTROL *    const rc = &cpi->rc;
   const int w = cm->width;
   const int h = cm->height;
-  int i;
-
-  for (i = 0; i < FRAME_SCALE_STEPS; ++i) {
+  for (int i = 0; i < FRAME_SCALE_STEPS; ++i) {
     // Note: Frames with odd-sized dimensions may result from this scaling.
-    rc->frame_width[i] = (w * 16) / frame_scale_factor[i];
+    rc->frame_width [i] = (w * 16) / frame_scale_factor[i];
     rc->frame_height[i] = (h * 16) / frame_scale_factor[i];
   }
 
   setup_rf_level_maxq(cpi);
 }
 
-void calculate_coded_size(VP9_COMP *cpi, int *scaled_frame_width,
-                          int *scaled_frame_height) {
-  RATE_CONTROL *const rc = &cpi->rc;
-  *scaled_frame_width = rc->frame_width[rc->frame_size_selector];
+void calculate_coded_size(VP9_COMP* cpi, int* scaled_frame_width,
+                          int* scaled_frame_height) {
+  RATE_CONTROL* const rc = &cpi->rc;
+  *scaled_frame_width  = rc->frame_width[rc->frame_size_selector];
   *scaled_frame_height = rc->frame_height[rc->frame_size_selector];
 }
 
 void vp9_init_second_pass(VP9_COMP *cpi) {
-  VP9EncoderConfig *const oxcf = &cpi->oxcf;
-  RATE_CONTROL *const rc = &cpi->rc;
-  TWO_PASS *const twopass = &cpi->twopass;
+  VP9EncoderConfig* const oxcf = &cpi->oxcf;
+  RATE_CONTROL*     const rc   = &cpi->rc;
+  TWO_PASS* const twopass = &cpi->twopass;
   double frame_rate;
-  FIRSTPASS_STATS *stats;
+  FIRSTPASS_STATS* stats;
 
   zero_stats(&twopass->total_stats);
   zero_stats(&twopass->total_left_stats);
@@ -1844,8 +1968,8 @@ static int detect_flash(const TWO_PASS *twopass, int offset) {
   // frame coded error.
   return next_frame != NULL &&
          ((next_frame->sr_coded_error < next_frame->coded_error) ||
-          ((next_frame->pcnt_second_ref > next_frame->pcnt_inter) &&
-           (next_frame->pcnt_second_ref >= 0.5)));
+         ((next_frame->pcnt_second_ref > next_frame->pcnt_inter) &&
+          (next_frame->pcnt_second_ref >= 0.5)));
 }
 
 // Update the motion related elements to the GF arf boost calculation.
@@ -1905,12 +2029,13 @@ static double kf_err_per_mb(VP9_COMP *cpi) {
   unsigned int screen_area = (cm->width * cm->height);
 
   // Use a different error per mb factor for calculating boost for
-  //  different formats.
-  if (screen_area < 1280 * 720) {
+  // different formats.
+  if (screen_area < 1280 * 720)
     return 2000.0;
-  } else if (screen_area < 1920 * 1080) {
+
+  if (screen_area < 1920 * 1080)
     return 500.0;
-  }
+
   return 250.0;
 }
 
