@@ -700,6 +700,39 @@ static void accumulate_floating_point_stats(VP9_COMP *cpi,
   }
 }
 
+// TODO(clin)
+static void output_fp_stats_csv(FIRSTPASS_STATS fps) {
+  fprintf(stderr, "Writing to CSV file 'firstpass_stat.csv'...\n");
+  FILE *csvFile;
+  csvFile = fopen("firstpass_stat.csv", "a");
+
+  // Write field headers
+  fseek(csvFile, 0, SEEK_END);
+    long fileSize = ftell(csvFile);
+    if (fileSize == 0) {
+        // Write the field titles as the first line
+        fprintf(csvFile, "frame,weight,intra_error,coded_error,sr_coded_error,"
+                        "frame_noise_energy,pcnt_inter,pcnt_motion,pcnt_second_ref,"
+                        "pcnt_neutral,pcnt_intra_low,pcnt_intra_high,intra_skip_pct,"
+                        "intra_smooth_pct,inactive_zone_rows,inactive_zone_cols,MVr,"
+                        "mvr_abs,MVc,mvc_abs,MVrv,MVcv,mv_in_out_count,"
+                        "duration,count,spatial_layer_id\n");
+    }
+  
+  // Write field values
+  fprintf(csvFile, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lld\n",
+      fps.frame, fps.weight, fps.intra_error, fps.coded_error, fps.sr_coded_error,
+      fps.frame_noise_energy, fps.pcnt_inter, fps.pcnt_motion, fps.pcnt_second_ref,
+      fps.pcnt_neutral, fps.pcnt_intra_low, fps.pcnt_intra_high, fps.intra_skip_pct,
+      fps.intra_smooth_pct, fps.inactive_zone_rows, fps.inactive_zone_cols, fps.MVr,
+      fps.mvr_abs, fps.MVc, fps.mvc_abs, fps.MVrv, fps.MVcv, fps.mv_in_out_count,
+      fps.duration, fps.count, fps.spatial_layer_id);
+  
+  fclose(csvFile);
+
+  fprintf(stderr, "Updated successfully: CSV file 'firstpass_stat.csv'.\n");
+}
+
 static void first_pass_stat_calc(VP9_COMP *cpi, FIRSTPASS_STATS *fps,
                                  FIRSTPASS_DATA *fp_acc_data) {
   VP9_COMMON *const cm = &cpi->common;
@@ -1559,6 +1592,9 @@ void vp9_first_pass(VP9_COMP *cpi, const struct lookahead_entry *source) {
     twopass->this_frame_stats = fps;
     output_stats(&twopass->this_frame_stats, cpi->output_pkt_list);
     accumulate_stats(&twopass->total_stats, &fps);
+
+    // TODO(clin)
+    output_fp_stats_csv(fps);
 
 #if CONFIG_FP_MB_STATS
     if (cpi->use_fp_mb_stats) {
